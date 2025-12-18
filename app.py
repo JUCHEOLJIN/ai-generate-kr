@@ -14,7 +14,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # CORS 설정
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": ["http://localhost:5174", "https://ai-generate-kr-client.vercel.app"]}})
 
 # LLM 클라이언트 초기화
 try:
