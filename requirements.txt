@@ -2,4 +2,5 @@ flask
 flask-cors
 google-genai
 python-dotenv
+python-docx
 gunicorn
