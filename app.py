@@ -1,11 +1,17 @@
 # korean-agent-project/app.py
 import os
 import json
+from docx.enum.section import WD_SECTION
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, make_response, request, jsonify, send_file
 from google import genai
 from google.genai import types
 from flask_cors import CORS
+from docx import Document
+from docx.shared import Pt
+from docx.oxml.ns import qn
+from io import BytesIO
+from urllib.parse import quote  
 
 # .env 파일에서 환경 변수를 로드
 load_dotenv()
@@ -215,6 +221,88 @@ def generate_endpoint():
 def health_check():
     """서버 상태 확인"""
     return "Korean Agent Project is Running!"
+
+
+
+@app.route('/download-docx', methods=['POST'])
+def download_docx():
+    try:
+        data = request.json
+        problems = data.get('problems', [])
+        level = data.get('level', '고등')
+        
+        doc = Document()
+
+        # --- 1. 첫 번째 섹션 (제목 - 1단 기본값) ---
+        section = doc.sections[0]
+        # 여백 설정
+        section.top_margin = Pt(40)
+        section.bottom_margin = Pt(40)
+        section.left_margin = Pt(40)
+        section.right_margin = Pt(40)
+
+        # 제목 추가 (현재 1단 상태)
+        title = doc.add_heading(f'2025학년도 국어 시험지 ({level})', 0)
+        title.alignment = 1 # 가운데 정렬
+        doc.add_paragraph("") # 제목 아래 여백
+
+        # --- 2. 두 번째 섹션 (문제 - 2단 설정) ---
+        # 새로운 섹션을 추가합니다. WD_SECTION.CONTINUOUS는 페이지를 넘기지 않고 그 자리에서 섹션만 바꿉니다.
+        new_section = doc.add_section(WD_SECTION.CONTINUOUS)
+        
+        # 새로운 섹션의 XML을 조작하여 2단으로 만듭니다.
+        sectPr = new_section._sectPr
+        cols = sectPr.xpath('./w:cols')[0]
+        cols.set(qn('w:num'), '2')  # 2단
+        cols.set(qn('w:space'), '425')  # 단 사이 간격
+
+        # 문제 루프 (이제부터 2단으로 들어갑니다)
+        circles = ["①", "②", "③", "④", "⑤"]
+        for i, p in enumerate(problems):
+            para = doc.add_paragraph()
+            run = para.add_run(f"{i+1}. {p['question']}")
+            run.font.size = Pt(10.5)
+            run.bold = True
+            
+            for idx, opt in enumerate(p['options']):
+                opt_para = doc.add_paragraph()
+                opt_para.paragraph_format.left_indent = Pt(10)
+                opt_para.add_run(f"{circles[idx]} {opt}")
+            
+            doc.add_paragraph("")
+
+        # --- 3. 세 번째 섹션 (정답지 - 다시 1단) ---
+        doc.add_page_break() # 정답지는 다음 페이지로
+        final_section = doc.add_section(WD_SECTION.NEW_PAGE)
+        final_sectPr = final_section._sectPr
+        final_cols = final_sectPr.xpath('./w:cols')[0]
+        final_cols.set(qn('w:num'), '1') # 다시 1단
+
+        doc.add_heading('정답 및 해설', level=1)
+        for i, p in enumerate(problems):
+            ans_para = doc.add_paragraph()
+            ans_para.add_run(f"[{i+1}번 정답]: {p['answer_index'] + 1}번").bold = True
+            ans_para.add_run(f"\n해설: {p['explanation']}")
+
+        # 파일 저장 및 전송 로직 (기존과 동일)
+        f = BytesIO()
+        doc.save(f)
+        binary_data = f.getvalue()
+        f.close()
+        
+        response = make_response(binary_data)
+        filename = f"ko_exam_{level}.docx"
+        encoded_filename = quote(filename)
+
+        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        response.headers['Content-Disposition'] = f'attachment; filename={encoded_filename}'
+        response.headers['Content-Length'] = len(binary_data)
+        
+        return response
+
+    except Exception as e:
+        print(f"다운로드 중 오류: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # --- 서버 실행 ---
