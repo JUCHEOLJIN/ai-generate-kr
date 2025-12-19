@@ -86,8 +86,108 @@ LEVEL_SPECIFIC_GUIDE = {
     "고3": "수능 실전 단계. 복합적인 논리 구조를 파악하고 비판적으로 평가하는 고난도 문제를 생성하세요."
 }
 
+json_schema = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "problems": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "type": types.Schema(type=types.Type.STRING),
+                        "question": types.Schema(type=types.Type.STRING),
+                        "options": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)),
+                        "answer_index": types.Schema(type=types.Type.INTEGER),
+                        "explanation": types.Schema(type=types.Type.STRING),
+                    }
+                )
+            )
+        }
+    )
+
 
 # --- 에이전트 코어 기능: 문제 생성 (현재는 단순 도구 역할) ---
+def generate_initial_problems(input_text, num_problems, level, instruction, strategy, genre, reason):
+    prompt = f"""
+    당신은 대한민국 국어 교육 전문가입니다. 대상은 [{level}] 학생들입니다.
+    분석 결과, 이 지문은 [{genre}] 타입입니다. ({reason})
+    
+    다음 지침에 따라 문제를 출제하십시오:
+    1. 전략: {strategy['description']}
+    2. 출제 포인트: {strategy['points']}
+    3. 출제 대상 분석 지침: {instruction}
+    4. 문제 개수: {num_problems}개
+    5. 모든 문제는 5지선다형 객관식이어야 합니다.
+    6. 2022 개정 교육과정의 성취기준을 바탕으로 하세요.
+
+    출력은 반드시 제공된 JSON 스키마를 따르십시오.
+
+    [지문]:
+    {input_text}
+    """
+
+
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=json_schema
+    )
+    
+    response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=config
+    )
+    return json.loads(response.text)
+
+
+def review_problems(input_text, initial_problems):
+    review_prompt = f"""
+    당신은 수능 국어 검토 위원입니다. 다음 생성된 문제들의 오류를 찾아 '검토 보고서'를 작성하세요.
+    
+    [지문]: 
+    {input_text}
+
+    [검토 대상 문제]: 
+    {json.dumps(initial_problems, ensure_ascii=False)}
+    
+    [검토 항목]:
+    - 사실 일치: 정답의 근거가 지문에 명확히 있는가?
+    - 오답 타당성: 오답 선지들이 정답이 될 가능성은 없는가?
+    - 발문 적절성: 국어 교육과정의 발문 형식을 따르는가?
+    
+    오류가 있다면 번호별로 지적하고, 없으면 '통과'라고 적으세요.
+    """
+    
+    response = client.models.generate_content(
+        model=GEMINI_MODEL, 
+        contents=review_prompt
+    )
+    return response.text
+
+
+def refine_problems(input_text, initial_problems, review_report):
+    if "통과" in review_report and len(review_report) < 10:
+        return initial_problems
+
+    refine_prompt = f"""
+    당신은 국어 전문 교정가입니다. 아래 검토 보고서를 바탕으로 문제를 완벽하게 수정하세요.
+    
+    [원본 문제]: {json.dumps(initial_problems, ensure_ascii=False)}
+    [검토 보고서]: {review_report}
+    
+    검토 의견을 반영하여 수정된 최종 문제를 JSON 형식으로만 출력하세요. 지문 내용은 바꾸지 마세요.
+    """
+    
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=refine_prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=json_schema
+        )
+    )
+    return json.loads(response.text)
+
 def generate_problem_tool(input_text: str, num_problems: int, level="중1"):
     """에이전트 워크플로우: 지문 분석 후 맞춤형 문제 생성"""
     if not client:
@@ -114,78 +214,35 @@ def generate_problem_tool(input_text: str, num_problems: int, level="중1"):
         genre = analysis_data.get("genre", "비문학")
         reason = analysis_data.get("reason", "")
 
-        # --- 2단계: Strategist (전략 선택) ---
         # 판별된 장르가 STRATEGIES에 없으면 기본값으로 '비문학' 사용
         strategy = STRATEGIES.get(genre, STRATEGIES["비문학"])
-
-        # --- 3단계: Leveler (학년별 난이도 선택) ---
         # 판별된 학년이 LEVEL_SPECIFIC_GUIDE에 없으면 기본값으로 '중1' 사용
         instruction = LEVEL_SPECIFIC_GUIDE.get(level, LEVEL_SPECIFIC_GUIDE["중1"])
         
 
 
 
-        # --- 3단계: Generator (맞춤형 문제 생성) ---
-        prompt = f"""
-        당신은 대한민국 국어 교육 전문가입니다. 대상은 [{level}] 학생들입니다.
-        분석 결과, 이 지문은 [{genre}] 타입입니다. ({reason})
-        
-        다음 지침에 따라 문제를 출제하십시오:
-        1. 전략: {strategy['description']}
-        2. 출제 포인트: {strategy['points']}
-        3. 출제 대상 분석 지침: {instruction}
-        4. 문제 개수: {num_problems}개
-        5. 모든 문제는 5지선다형 객관식이어야 합니다.
-        6. 2022 개정 교육과정의 성취기준을 바탕으로 하세요.
+        # --- 2단계: Generator (맞춤형 문제 생성) ---
+        initial_problems = generate_initial_problems(input_text, num_problems, level, instruction, strategy, genre, reason)
 
-        출력은 반드시 제공된 JSON 스키마를 따르십시오.
+        # --- 3단계: Reviewer (문제 검토) ---
+        review_report = review_problems(input_text, initial_problems)
 
-        [지문]:
-        {input_text}
-        """
-
-        # JSON 스키마 정의 (기존과 동일)
-        json_schema = types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "problems": types.Schema(
-                    type=types.Type.ARRAY,
-                    items=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "type": types.Schema(type=types.Type.STRING),
-                            "question": types.Schema(type=types.Type.STRING),
-                            "options": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)),
-                            "answer_index": types.Schema(type=types.Type.INTEGER),
-                            "explanation": types.Schema(type=types.Type.STRING),
-                        }
-                    )
-                )
-            }
-        )
-
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=json_schema
-        )
-
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=config
-        )
+        # --- 4단계: Refiner (문제 수정) ---
+        result = refine_problems(input_text, initial_problems, review_report)
 
         # 결과 데이터 결합 (분석 결과도 함께 반환하여 프론트에서 활용 가능하게 함)
-        result = json.loads(response.text)
         result["metadata"] = {
             "genre": genre,
-            "analysis_reason": reason
+            "analysis_reason": reason,
+            "review_report": review_report
         }
 
         return result
 
     except Exception as e:
         return {"error": f"Agent Workflow failed: {e}"}
+
 
 
 # --- Flask API 엔드포인트 ---
