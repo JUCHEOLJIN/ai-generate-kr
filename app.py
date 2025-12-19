@@ -244,6 +244,39 @@ def generate_problem_tool(input_text: str, num_problems: int, level="중1"):
         return {"error": f"Agent Workflow failed: {e}"}
 
 
+# --- 지문 추출 관련 기능 ---
+def extract_text_from_file(file_bytes, mime_type):
+    """
+    이미지/PDF 바이너리에서 지문(본문)만 추출하는 함수
+    """
+    if not client:
+        return None
+
+    # 지문만 골라내도록 페르소나와 지침 부여
+    extract_prompt = """
+    당신은 국어 교재 전문 OCR 에이전트입니다. 
+    제공된 이미지 또는 PDF 파일에서 '지문(본문)'에 해당하는 텍스트만 추출하세요.
+
+    [지침]:
+    1. 문제 번호, 선택지(①~⑤), 페이지 번호, 로고 등은 모두 무시합니다.
+    2. 지문의 제목과 본문 텍스트만 원문 그대로 추출합니다.
+    3. 줄바꿈을 유지하여 가독성 있게 구성하세요.
+    4. 텍스트 외에 "추출 결과입니다" 같은 부연 설명은 하지 마세요.
+    """
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL, 
+            contents=[
+                extract_prompt,
+                types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+            ]
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"❌ Extraction Error: {e}")
+        return None
+
 
 # --- Flask API 엔드포인트 ---
 
@@ -360,6 +393,23 @@ def download_docx():
     except Exception as e:
         print(f"다운로드 중 오류: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/extract-text', methods=['POST'])
+def extract_text():
+    if 'file' not in request.files:
+        return jsonify({"error": "파일이 없습니다."}), 400
+    
+    file = request.files['file']
+    file_bytes = file.read()
+    mime_type = file.mimetype # image/png, application/pdf 등
+    
+    # 추출 함수 호출
+    extracted_text = extract_text_from_file(file_bytes, mime_type)
+    
+    if not extracted_text:
+        return jsonify({"error": "텍스트 추출에 실패했습니다. 파일 형식을 확인하거나 나중에 다시 시도하세요."}), 500
+        
+    return jsonify({"extracted_text": extracted_text})
 
 
 # --- 서버 실행 ---
