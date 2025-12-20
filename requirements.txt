@@ -4,3 +4,5 @@ google-genai
 python-dotenv
 python-docx
 gunicorn
+gspread
+oauth2client

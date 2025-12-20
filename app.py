@@ -11,7 +11,10 @@ from docx import Document
 from docx.shared import Pt
 from docx.oxml.ns import qn
 from io import BytesIO
-from urllib.parse import quote  
+from urllib.parse import quote
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials  
+import json
 
 # .env 파일에서 환경 변수를 로드
 load_dotenv()
@@ -277,6 +280,33 @@ def extract_text_from_file(file_bytes, mime_type):
         print(f"❌ Extraction Error: {e}")
         return None
 
+def connect_google_sheet():
+    # 1. 환경 변수에서 JSON 문자열 가져오기
+    print("GOOGLE_CREDENTIALS_JSON: ", os.environ.get('GOOGLE_CREDENTIALS_JSON'))
+    creds_json_str = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    print(creds_json_str[:20])
+    
+    if not creds_json_str:
+        # 로컬 개발 환경을 위해 파일을 찾는 로직을 남겨둘 수 있습니다.
+        try:
+            with open('credentials.json') as f:
+                creds_info = json.load(f)
+        except FileNotFoundError:
+            raise Exception("Google Credentials가 설정되지 않았습니다.")
+    else:
+        # 환경 변수에 저장된 문자열을 파이썬 딕셔너리로 변환
+        creds_info = json.loads(creds_json_str)
+
+    # 2. 인증 설정
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
+    client = gspread.authorize(creds)
+    
+    # 3. 시트 열기
+    sheet = client.open("국어 지문").sheet1 
+    
+    return sheet
+
 
 # --- Flask API 엔드포인트 ---
 
@@ -410,6 +440,52 @@ def extract_text():
         return jsonify({"error": "텍스트 추출에 실패했습니다. 파일 형식을 확인하거나 나중에 다시 시도하세요."}), 500
         
     return jsonify({"extracted_text": extracted_text})
+
+@app.route('/save-passage', methods=['POST'])
+def save_passage():
+    try:
+        data = request.json
+        title = data.get('title', '제목 없음')
+        content = data.get('content')
+        level = data.get('level', '미지정')
+
+        if not content:
+            return jsonify({"error": "저장할 지문 내용이 없습니다."}), 400
+
+        sheet = connect_google_sheet()
+        
+        import datetime
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 시트 헤더: [날짜, 제목, 지문내용, 난이도]
+        sheet.append_row([now, title, content, level])
+        
+        return jsonify({"status": "success", "message": "지문이 저장되었습니다!"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/passages', methods=['GET'])
+def list_passages():
+    try:
+        sheet = connect_google_sheet()
+        # 모든 데이터를 가져와서 딕셔너리 리스트로 변환
+        records = sheet.get_all_records()
+        
+        # 한글 키를 영문 키로 변환
+        converted = []
+        for record in records:
+            converted.append({
+                "timestamp": record.get("날짜", ""),
+                "title": record.get("제목", ""),
+                "content": record.get("지문", ""),
+                "level": record.get("분류", "")
+            })
+        
+        # 최근 저장한게 위로 오게 역순 정렬
+        converted.reverse() 
+        return jsonify(converted)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # --- 서버 실행 ---
